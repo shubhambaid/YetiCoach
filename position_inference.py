@@ -1,6 +1,8 @@
+from re import S
 import torch
 import numpy as np
 import cv2
+import pandas as pd
 from math import sqrt
 from angle_metrics import get_skii_angle
 from mono_depth import MonoDepth
@@ -12,6 +14,11 @@ class Yeti:
             "ultralytics/yolov5", "custom", path="weights/det_2.pt"
         )
         self.mono = MonoDepth()
+        self.sensor_data = tuple()
+        self.collected_data = []
+        self.angle = 0
+        self.split = ""
+        self.depth = ""
 
     def plot_boxes(self, det, img, line_thickness=3):
         c1, c2 = (int(det[0]) - 10, int(det[1])), (int(det[2]) + 10, int(det[3]))
@@ -43,6 +50,13 @@ class Yeti:
         )
         return text_size
 
+    def sensor_data_fetch(self):
+        df = pd.read_csv(r"pod01_raw.csv")
+        data_df = []
+        for index, rows in df.iterrows():
+            data_df.append([rows.Latitude, rows.Longitude])
+        self.sensor_data = data_df
+
     def get_distance_skii(self, dets, frame):
         centroids = []
         for det in dets:
@@ -56,30 +70,50 @@ class Yeti:
         dist = sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
         if dist < 200:
             result = "Close"
+            self.split = "Close"
         else:
             result = "Far"
+            self.split = "Far"
         self.draw_text(
             frame, "Separation: {}".format(result), (30, 10), (0, 200, 200), (0, 0, 0)
         )
         return frame, dist
-    
-    def map_depth_values(self,frame,depth):
+
+    def map_depth_values(self, frame, depth):
+        self.depth = depth
         self.draw_text(
-                        frame,
-                        "Depth: {}".format(str(depth)),
-                        (30, 80),
-                        (0, 200, 200),
-                        (0, 0, 0),
-                    )
+            frame,
+            "Depth: {}".format(str(depth)),
+            (30, 80),
+            (0, 200, 200),
+            (0, 0, 0),
+        )
+
+    def prep_data(self, data):
+        self.collected_data.append(
+            {
+                "gpscoords": str(data[0][0]) + "," + str(data[0][1]),
+                "angle": str(data[1]),
+                "split": self.split,
+                "depth": self.depth,
+            }
+        )
+        return "OK"
 
     def inference(self, video_path):
         vid = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
-
+        frame_count = 0
+        dataframe_count = 0
         while True:
             ret, frame = vid.read()
             if ret == False:
                 break
 
+            frame_count += 1
+            if frame_count % 3 == 0:
+                dataframe_count += 1
+
+            relative_dataset = self.sensor_data[dataframe_count]
             detections = []
             skii_angles = []
             results = self.model(frame)
@@ -99,30 +133,33 @@ class Yeti:
 
             if len(detections) == 2:
                 frame, distance = self.get_distance_skii(detections, frame)
-            
+
             if len(detections) > 0:
-                depth_image,approx_depth = self.mono.get_depth(frame,detections[0])
+                depth_image, approx_depth = self.mono.get_depth(frame, detections[0])
                 frame = np.concatenate((frame, depth_image), axis=1)
-                self.map_depth_values(int(frame,approx_depth[2]))
+                self.map_depth_values(frame, int(approx_depth[2]))
             if len(detections) == 0:
-                depth_image,approx_depth = self.mono.get_depth(frame,[100,300,400,300])
+                depth_image, approx_depth = self.mono.get_depth(
+                    frame, [100, 300, 400, 300]
+                )
                 frame = np.concatenate((frame, depth_image), axis=1)
-                self.map_depth_values(frame,"NaN")
+                self.map_depth_values(frame, "NaN")
 
             for detection in detections:
                 self.plot_boxes(detection, frame, 3)
 
             if len(skii_angles) > 1:
-                angle = int(sum(skii_angles) / len(skii_angles))
-                if angle > 0:
+                self.angle = int(sum(skii_angles) / len(skii_angles))
+                if self.angle > 0:
                     self.draw_text(
                         frame,
-                        "Angle: {}".format(str(angle)),
+                        "Angle: {}".format(str(self.angle)),
                         (30, 50),
                         (0, 200, 200),
                         (0, 0, 0),
                     )
                 else:
+                    self.angle = 0
                     self.draw_text(
                         frame,
                         "Angle: {}".format("NaN"),
@@ -130,15 +167,23 @@ class Yeti:
                         (0, 200, 200),
                         (0, 0, 0),
                     )
-                    
+            self.prep_data(
+                [
+                    [relative_dataset[0], relative_dataset[1]],
+                    self.angle,
+                    self.split,
+                    self.depth,
+                ]
+            )
             cv2.imshow("frame", frame)
             key = cv2.waitKey(1)
             if key == ord("q"):
                 break
         vid.release()
-        return "[Video Processing Complete]"
+        return self.collected_data
 
 
 if __name__ == "__main__":
     yeti = Yeti()
+    yeti.sensor_data_fetch()
     yeti.inference("videos/gp1.mp4")
