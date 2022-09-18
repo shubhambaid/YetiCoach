@@ -1,8 +1,9 @@
-from dis import dis
 import torch
+import numpy as np
 import cv2
 from math import sqrt
 from angle_metrics import get_skii_angle
+from mono_depth import MonoDepth
 
 
 class Yeti:
@@ -10,6 +11,7 @@ class Yeti:
         self.model = torch.hub.load(
             "ultralytics/yolov5", "custom", path="weights/det_2.pt"
         )
+        self.mono = MonoDepth()
 
     def plot_boxes(self, det, img, line_thickness=3):
         c1, c2 = (int(det[0]) - 10, int(det[1])), (int(det[2]) + 10, int(det[3]))
@@ -17,11 +19,8 @@ class Yeti:
         cv2.rectangle(
             img, c1, c2, color, thickness=line_thickness, lineType=cv2.LINE_AA
         )
-        if((det[2]-det[0]) > (det[3]-det[1])):
-            self.draw_text(
-                img, "Tilt Detected", (500, 10), (0, 100, 140), (0, 0, 0)
-                )
-
+        if (det[2] - det[0]) > (det[3] - det[1]):
+            self.draw_text(img, "Tilt Detected", (500, 10), (0, 100, 140), (0, 0, 0))
 
     def get_centroid(self, coords):
         return (coords[0] + (coords[2] / 2), coords[1] + (coords[3] / 2))
@@ -63,6 +62,15 @@ class Yeti:
             frame, "Separation: {}".format(result), (30, 10), (0, 200, 200), (0, 0, 0)
         )
         return frame, dist
+    
+    def map_depth_values(self,frame,depth):
+        self.draw_text(
+                        frame,
+                        "Depth: {}".format(str(depth)),
+                        (30, 80),
+                        (0, 200, 200),
+                        (0, 0, 0),
+                    )
 
     def inference(self, video_path):
         vid = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
@@ -80,25 +88,49 @@ class Yeti:
                     detections.append(
                         [int(result[1]), int(result[2]), int(result[3]), int(result[4])]
                     )
-                    skii_angles.append(get_skii_angle(frame[int(result[2]):int(result[4]),int(result[1]):int(result[3])]))
-
-            for detection in detections:
-                self.plot_boxes(detection, frame, 3)
+                    skii_angles.append(
+                        get_skii_angle(
+                            frame[
+                                int(result[2]) : int(result[4]),
+                                int(result[1]) : int(result[3]),
+                            ]
+                        )
+                    )
 
             if len(detections) == 2:
                 frame, distance = self.get_distance_skii(detections, frame)
             
-            if len(skii_angles)>1:
-                angle = int(sum(skii_angles)/len(skii_angles))
+            if len(detections) > 0:
+                depth_image,approx_depth = self.mono.get_depth(frame,detections[0])
+                frame = np.concatenate((frame, depth_image), axis=1)
+                self.map_depth_values(int(frame,approx_depth[2]))
+            if len(detections) == 0:
+                depth_image,approx_depth = self.mono.get_depth(frame,[100,300,400,300])
+                frame = np.concatenate((frame, depth_image), axis=1)
+                self.map_depth_values(frame,"NaN")
+
+            for detection in detections:
+                self.plot_boxes(detection, frame, 3)
+
+            if len(skii_angles) > 1:
+                angle = int(sum(skii_angles) / len(skii_angles))
                 if angle > 0:
                     self.draw_text(
-                        frame, "Angle: {}".format(str(angle)), (30, 50), (0, 200, 200), (0, 0, 0)
+                        frame,
+                        "Angle: {}".format(str(angle)),
+                        (30, 50),
+                        (0, 200, 200),
+                        (0, 0, 0),
                     )
                 else:
                     self.draw_text(
-                        frame, "Angle: {}".format("NaN"), (30, 50), (0, 200, 200), (0, 0, 0)
+                        frame,
+                        "Angle: {}".format("NaN"),
+                        (30, 50),
+                        (0, 200, 200),
+                        (0, 0, 0),
                     )
-
+                    
             cv2.imshow("frame", frame)
             key = cv2.waitKey(1)
             if key == ord("q"):
